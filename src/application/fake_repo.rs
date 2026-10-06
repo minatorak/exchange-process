@@ -36,10 +36,7 @@ pub(crate) struct RecordedEvent {
 impl RecordedEvent {
     /// The closed event's side, read back from the recorded payload.
     pub(crate) fn payload_side(&self) -> String {
-        self.payload["side"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned()
+        self.payload["side"].as_str().unwrap_or_default().to_owned()
     }
 }
 
@@ -143,8 +140,12 @@ impl PositionRepository for FakePositionRepository {
         self.check_write()?;
         let mut rows = self.rows.lock().unwrap();
         let key = (open.snapshot.exchange_account, open.snapshot.symbol.clone());
-        if rows.contains_key(&key) {
-            // The real repository relies on the primary key the same way.
+        if let Some(existing) = rows.get(&key)
+            && existing.is_open()
+        {
+            // The real repository relies on the primary key the same way:
+            // an OPEN row wins; only a closed row re-opens under the new
+            // instance.
             return Ok(());
         }
         rows.insert(
@@ -171,7 +172,7 @@ impl PositionRepository for FakePositionRepository {
         let mut rows = self.rows.lock().unwrap();
         let key = (write.next.exchange_account, write.next.symbol.clone());
         match rows.get_mut(&key) {
-            Some(row) => {
+            Some(row) if row.is_open() => {
                 // Preserve identity; refresh observation fields.
                 row.side = write.next.side;
                 row.size = write.next.size;
@@ -182,6 +183,28 @@ impl PositionRepository for FakePositionRepository {
                 row.position_status = write.next.position_status;
                 row.unrealised_pnl = write.next.unrealised_pnl;
                 row.position_value = write.next.position_value;
+            }
+            Some(row) if !write.next.size.is_some_and(|size| size.is_zero()) => {
+                // Closed row re-observed non-flat: a NEW position instance
+                // re-opens the row under the ingestor's fresh identity
+                // (mirrors the repo's `ON CONFLICT ... DO UPDATE` branch).
+                row.side = write.next.side;
+                row.size = write.next.size;
+                row.avg_price = write.next.avg_price;
+                row.stop_loss = write.next.stop_loss;
+                row.take_profit = write.next.take_profit;
+                row.leverage = write.next.leverage;
+                row.position_status = write.next.position_status;
+                row.unrealised_pnl = write.next.unrealised_pnl;
+                row.position_value = write.next.position_value;
+                row.position_instance_id = write.instance_id;
+                row.order_link_id = write.order_link_id.map(str::to_owned);
+                row.opened_at_ms = Some(write.next.occurred_at_ms);
+                row.closed_at_ms = None;
+            }
+            Some(_) => {
+                // Closed row + flat observation: the real repository's WHERE
+                // clause skips the update entirely.
             }
             None => {
                 rows.insert(
@@ -214,6 +237,7 @@ impl PositionRepository for FakePositionRepository {
             return Err(RepoError::Other(anyhow::anyhow!("mirror row missing")));
         };
         row.size = Some(rust_decimal::Decimal::ZERO);
+        row.side = None; // the real repository flattens the row (`side = 'None'`)
         row.closed_at_ms = Some(write.closed_at_ms);
         drop(rows);
         let event_id = Uuid::new_v4();

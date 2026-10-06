@@ -102,3 +102,134 @@ impl<R: PositionRepository> MirrorIngestor<R> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::fake_repo::FakePositionRepository;
+    use crate::domain::position::Side;
+    use rust_decimal::Decimal;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    fn account() -> Uuid {
+        Uuid::parse_str("b3c1d2a4-0000-4000-8000-000000000001").unwrap()
+    }
+
+    fn identity() -> MirrorIdentity {
+        MirrorIdentity {
+            user_id: "user-9f2b3c".to_owned(),
+            channel: "bybit-linear".to_owned(),
+        }
+    }
+
+    fn snapshot(side: Option<Side>, size: &str, seq: i64) -> PositionSnapshot {
+        PositionSnapshot {
+            exchange_account: account(),
+            symbol: "BTCUSDT".to_owned(),
+            side,
+            size: Some(Decimal::from_str_exact(size).unwrap()),
+            avg_price: None,
+            stop_loss: None,
+            take_profit: None,
+            leverage: None,
+            position_status: None,
+            unrealised_pnl: None,
+            position_value: None,
+            occurred_at_ms: 1_788_948_000_400,
+            seq: Some(seq),
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_symbol_reopens_as_a_new_instance() {
+        let repo = Arc::new(FakePositionRepository::default());
+        let ingestor = MirrorIngestor::new(repo.clone());
+
+        // Instance one: opened, then closed through the normal flow.
+        let opened = ingestor
+            .ingest(
+                &snapshot(Some(Side::Buy), "0.015", 1),
+                &identity(),
+                ChangeSource::Ws,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(opened, IngestOutcome::Changed { .. }));
+        let first_instance = repo.row(account(), "BTCUSDT").unwrap().position_instance_id;
+        repo.mark_closed(crate::domain::repo::CloseWrite {
+            account: account(),
+            symbol: "BTCUSDT",
+            instance_id: first_instance,
+            order_link_id: None,
+            identity: &identity(),
+            totals: &crate::domain::position::aggregate_closed(&[], Side::Buy),
+            fallback: true,
+            source: ChangeSource::Ws,
+            closed_at_ms: 1_788_948_100_900,
+        })
+        .await
+        .unwrap();
+        assert!(!repo.row(account(), "BTCUSDT").unwrap().is_open());
+
+        // A later non-flat observation is a NEW instance of the same symbol.
+        let reopened = ingestor
+            .ingest(
+                &snapshot(Some(Side::Sell), "0.020", 2),
+                &identity(),
+                ChangeSource::Ws,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(reopened, IngestOutcome::Changed { .. }));
+        let row = repo.row(account(), "BTCUSDT").expect("mirror row");
+        assert!(row.is_open(), "the mirror re-opens after a close");
+        assert_ne!(row.position_instance_id, first_instance);
+        assert_eq!(row.side, Some(Side::Sell));
+    }
+
+    #[tokio::test]
+    async fn flat_observation_on_a_closed_row_changes_nothing() {
+        let repo = Arc::new(FakePositionRepository::default());
+        let ingestor = MirrorIngestor::new(repo.clone());
+        ingestor
+            .ingest(
+                &snapshot(Some(Side::Buy), "0.015", 1),
+                &identity(),
+                ChangeSource::Ws,
+            )
+            .await
+            .unwrap();
+        let instance = repo.row(account(), "BTCUSDT").unwrap().position_instance_id;
+        repo.mark_closed(crate::domain::repo::CloseWrite {
+            account: account(),
+            symbol: "BTCUSDT",
+            instance_id: instance,
+            order_link_id: None,
+            identity: &identity(),
+            totals: &crate::domain::position::aggregate_closed(&[], Side::Buy),
+            fallback: true,
+            source: ChangeSource::Ws,
+            closed_at_ms: 1_788_948_100_900,
+        })
+        .await
+        .unwrap();
+
+        let outcome = ingestor
+            .ingest(
+                &snapshot(None, "0", 2),
+                &identity(),
+                ChangeSource::Reconcile,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, IngestOutcome::NoChange);
+        let row = repo.row(account(), "BTCUSDT").unwrap();
+        assert!(
+            !row.is_open(),
+            "a flat push must not resurrect a closed row"
+        );
+    }
+}

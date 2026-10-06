@@ -42,8 +42,8 @@ pub(crate) fn map_position(
         side,
         size: Some(size),
         avg_price: decimal_field(&dto.avg_price, "avg_price")?,
-        stop_loss: None,
-        take_profit: None,
+        stop_loss: decimal_field(&dto.stop_loss, "stop_loss")?,
+        take_profit: decimal_field(&dto.take_profit, "take_profit")?,
         leverage: decimal_field(&dto.leverage, "leverage")?,
         position_status: parse_status(dto.position_status.as_deref())?,
         unrealised_pnl: decimal_field(&dto.unrealised_pnl, "unrealised_pnl")?,
@@ -86,6 +86,8 @@ mod tests {
             side: side.to_owned(),
             size: size.to_owned(),
             avg_price: String::new(),
+            stop_loss: String::new(),
+            take_profit: String::new(),
             leverage: String::new(),
             unrealised_pnl: String::new(),
             position_value: String::new(),
@@ -164,5 +166,44 @@ mod tests {
     fn flat_side_with_nonzero_size_is_inconsistent() {
         let raw = dto("", "0.015");
         assert!(map_position(&raw, account()).is_err());
+    }
+
+    #[test]
+    fn protection_fields_map_through() {
+        // TP/SL are evented mirror fields: the stream carries them on every
+        // position push, empty string meaning "not set" — the diff engine
+        // must see Some(value)/None, never a hardcoded None that would wipe
+        // a created event's protection on the first push.
+        let mut raw = dto("Buy", "0.015");
+        raw.stop_loss = "62800.0".to_owned();
+        raw.take_profit = "65000.0".to_owned();
+
+        let snapshot = map_position(&raw, account()).expect("maps");
+
+        assert_eq!(
+            snapshot.stop_loss,
+            Some(Decimal::from_str_exact("62800.0").unwrap())
+        );
+        assert_eq!(
+            snapshot.take_profit,
+            Some(Decimal::from_str_exact("65000.0").unwrap())
+        );
+
+        let mut unset = dto("Buy", "0.015");
+        unset.stop_loss = String::new();
+        unset.take_profit = String::new();
+        let snapshot = map_position(&unset, account()).expect("maps");
+        assert_eq!(snapshot.stop_loss, None);
+        assert_eq!(snapshot.take_profit, None);
+    }
+
+    #[test]
+    fn bad_protection_decimal_is_rejected() {
+        let mut raw = dto("Buy", "0.015");
+        raw.stop_loss = "sl".to_owned();
+        assert!(matches!(
+            map_position(&raw, account()),
+            Err(MapError::BadField("stop_loss"))
+        ));
     }
 }

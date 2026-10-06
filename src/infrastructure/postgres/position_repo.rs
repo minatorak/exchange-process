@@ -8,8 +8,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::domain::position::{
-    CLOSED_TOPIC, ChangeKind, CloseEvent, UPDATED_TOPIC, UpdateEvent,
-    closed_event_payload, updated_event_payload,
+    CLOSED_TOPIC, ChangeKind, CloseEvent, UPDATED_TOPIC, UpdateEvent, closed_event_payload,
+    updated_event_payload,
 };
 use crate::domain::repo::{
     CloseWrite, MirrorIdentity, MirrorOpen, MirrorRow, MirrorWrite, OpenMirrorPosition,
@@ -30,6 +30,71 @@ fn unavailable(error: sqlx::Error) -> RepoError {
     tracing::error!(%error, "mirror repository query failed");
     RepoError::Unavailable
 }
+
+/// `open_mirror` insert: an OPEN row wins (the created event arrived late or
+/// the position was already observed); only a CLOSED row re-opens under the
+/// event's fresh instance identity — `rows_affected()` distinguishes them.
+const OPEN_MIRROR_SQL: &str = "INSERT INTO exchange.positions_v2 \
+     (exchange_account, symbol, user_id, channel, position_instance_id, side, size, \
+      avg_price, leverage, position_value, unrealised_pnl, stop_loss, take_profit, \
+      position_status, order_link_id, opened_at_ms) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
+     ON CONFLICT (exchange_account, symbol) DO UPDATE SET \
+     user_id = EXCLUDED.user_id, \
+     channel = EXCLUDED.channel, \
+     position_instance_id = EXCLUDED.position_instance_id, \
+     side = EXCLUDED.side, \
+     size = EXCLUDED.size, \
+     avg_price = EXCLUDED.avg_price, \
+     leverage = EXCLUDED.leverage, \
+     position_value = EXCLUDED.position_value, \
+     unrealised_pnl = EXCLUDED.unrealised_pnl, \
+     stop_loss = EXCLUDED.stop_loss, \
+     take_profit = EXCLUDED.take_profit, \
+     position_status = EXCLUDED.position_status, \
+     order_link_id = EXCLUDED.order_link_id, \
+     opened_at_ms = EXCLUDED.opened_at_ms, \
+     closed_at_ms = NULL, \
+     updated_at = now() \
+     WHERE exchange.positions_v2.closed_at_ms IS NOT NULL";
+
+/// `mark_closed` flatten: one UPDATE guarded on still-open, so a second
+/// close of the same instance is a no-op for the mirror.
+const CLOSE_SQL: &str = "UPDATE exchange.positions_v2 SET \
+     side = 'None', size = 0, closed_at_ms = $3, updated_at = now() \
+     WHERE exchange_account = $1 AND symbol = $2 AND closed_at_ms IS NULL";
+
+/// `upsert_mirror` upsert: an open row keeps its instance identity and only
+/// refreshes observation columns; a closed row re-observed NON-flat re-opens
+/// as a new instance (the ingestor passes a fresh instance id); a flat
+/// observation on a closed row leaves it closed.
+const UPSERT_MIRROR_SQL: &str = "INSERT INTO exchange.positions_v2 \
+     (exchange_account, symbol, user_id, channel, position_instance_id, side, size, \
+      avg_price, leverage, position_value, unrealised_pnl, stop_loss, take_profit, \
+      position_status, order_link_id, opened_at_ms) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
+     ON CONFLICT (exchange_account, symbol) DO UPDATE SET \
+     side = EXCLUDED.side, \
+     size = EXCLUDED.size, \
+     avg_price = EXCLUDED.avg_price, \
+     leverage = EXCLUDED.leverage, \
+     position_value = EXCLUDED.position_value, \
+     unrealised_pnl = EXCLUDED.unrealised_pnl, \
+     stop_loss = EXCLUDED.stop_loss, \
+     take_profit = EXCLUDED.take_profit, \
+     position_status = EXCLUDED.position_status, \
+     position_instance_id = CASE WHEN exchange.positions_v2.closed_at_ms IS NULL \
+         THEN exchange.positions_v2.position_instance_id \
+         ELSE EXCLUDED.position_instance_id END, \
+     order_link_id = CASE WHEN exchange.positions_v2.closed_at_ms IS NULL \
+         THEN exchange.positions_v2.order_link_id \
+         ELSE EXCLUDED.order_link_id END, \
+     opened_at_ms = CASE WHEN exchange.positions_v2.closed_at_ms IS NULL \
+         THEN exchange.positions_v2.opened_at_ms \
+         ELSE EXCLUDED.opened_at_ms END, \
+     closed_at_ms = NULL, \
+     updated_at = now() \
+     WHERE exchange.positions_v2.closed_at_ms IS NULL OR EXCLUDED.size <> 0";
 
 /// JSONB columns come back as `serde_json::Value`; write them as strings.
 fn jsonb_text(value: &serde_json::Value) -> String {
@@ -100,40 +165,34 @@ impl PositionRepository for PositionRepoPg {
         let source = open.source;
         let mut tx = self.pool.begin().await.map_err(unavailable)?;
         let side = side_label(snapshot.side);
-        let inserted = sqlx::query(
-            "INSERT INTO exchange.positions_v2 \
-             (exchange_account, symbol, user_id, channel, position_instance_id, side, size, \
-              avg_price, leverage, position_value, unrealised_pnl, stop_loss, take_profit, \
-              position_status, order_link_id, opened_at_ms) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
-             ON CONFLICT (exchange_account, symbol) DO NOTHING",
-        )
-        .bind(snapshot.exchange_account)
-        .bind(&snapshot.symbol)
-        .bind(user_id)
-        .bind(channel)
-        .bind(instance_id)
-        .bind(side)
-        .bind(snapshot.size.unwrap_or(Decimal::ZERO))
-        .bind(snapshot.avg_price)
-        .bind(snapshot.leverage)
-        .bind(snapshot.position_value)
-        .bind(snapshot.unrealised_pnl)
-        .bind(snapshot.stop_loss)
-        .bind(snapshot.take_profit)
-        .bind(status_label(snapshot.position_status))
-        .bind(order_link_id)
-        .bind(snapshot.occurred_at_ms)
-        .execute(&mut *tx)
-        .await
-        .map_err(unavailable)?;
+        let inserted = sqlx::query(OPEN_MIRROR_SQL)
+            .bind(snapshot.exchange_account)
+            .bind(&snapshot.symbol)
+            .bind(user_id)
+            .bind(channel)
+            .bind(instance_id)
+            .bind(side)
+            .bind(snapshot.size.unwrap_or(Decimal::ZERO))
+            .bind(snapshot.avg_price)
+            .bind(snapshot.leverage)
+            .bind(snapshot.position_value)
+            .bind(snapshot.unrealised_pnl)
+            .bind(snapshot.stop_loss)
+            .bind(snapshot.take_profit)
+            .bind(status_label(snapshot.position_status))
+            .bind(order_link_id)
+            .bind(snapshot.occurred_at_ms)
+            .execute(&mut *tx)
+            .await
+            .map_err(unavailable)?;
         if inserted.rows_affected() == 0 {
-            // The (account, symbol) row already exists — the mirror is the
-            // authority; the created event arrived late.
+            // An OPEN (account, symbol) row already exists — the mirror is
+            // the authority; the created event arrived late (or the position
+            // was already observed). Only closed rows re-open above.
             tracing::warn!(
                 account = %snapshot.exchange_account,
                 symbol = %snapshot.symbol,
-                "open_mirror hit an existing mirror row; skipping created event"
+                "open_mirror hit an open mirror row; skipping created event"
             );
             tx.commit().await.map_err(unavailable)?;
             return Ok(());
@@ -185,47 +244,28 @@ impl PositionRepository for PositionRepoPg {
         let source = write.source;
         let mut tx = self.pool.begin().await.map_err(unavailable)?;
         let side = side_label(next.side);
-        // Upsert on the primary key. The identity of an existing open row
-        // (instance id, link id, user, channel, opened_at) must survive —
-        // only observation columns refresh.
-        sqlx::query(
-            "INSERT INTO exchange.positions_v2 \
-             (exchange_account, symbol, user_id, channel, position_instance_id, side, size, \
-              avg_price, leverage, position_value, unrealised_pnl, stop_loss, take_profit, \
-              position_status, order_link_id, opened_at_ms) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) \
-             ON CONFLICT (exchange_account, symbol) DO UPDATE SET \
-             side = EXCLUDED.side, \
-             size = EXCLUDED.size, \
-             avg_price = EXCLUDED.avg_price, \
-             leverage = EXCLUDED.leverage, \
-             position_value = EXCLUDED.position_value, \
-             unrealised_pnl = EXCLUDED.unrealised_pnl, \
-             stop_loss = EXCLUDED.stop_loss, \
-             take_profit = EXCLUDED.take_profit, \
-             position_status = EXCLUDED.position_status, \
-             updated_at = now() \
-             WHERE exchange.positions_v2.closed_at_ms IS NULL",
-        )
-        .bind(next.exchange_account)
-        .bind(&next.symbol)
-        .bind(user_id)
-        .bind(channel)
-        .bind(instance_id)
-        .bind(side)
-        .bind(next.size.unwrap_or(Decimal::ZERO))
-        .bind(next.avg_price)
-        .bind(next.leverage)
-        .bind(next.position_value)
-        .bind(next.unrealised_pnl)
-        .bind(next.stop_loss)
-        .bind(next.take_profit)
-        .bind(status_label(next.position_status))
-        .bind(order_link_id)
-        .bind(next.occurred_at_ms)
-        .execute(&mut *tx)
-        .await
-        .map_err(unavailable)?;
+        // Upsert on the primary key — see UPSERT_MIRROR_SQL for the full
+        // open-row-preserved / closed-row-reopened semantics.
+        sqlx::query(UPSERT_MIRROR_SQL)
+            .bind(next.exchange_account)
+            .bind(&next.symbol)
+            .bind(user_id)
+            .bind(channel)
+            .bind(instance_id)
+            .bind(side)
+            .bind(next.size.unwrap_or(Decimal::ZERO))
+            .bind(next.avg_price)
+            .bind(next.leverage)
+            .bind(next.position_value)
+            .bind(next.unrealised_pnl)
+            .bind(next.stop_loss)
+            .bind(next.take_profit)
+            .bind(status_label(next.position_status))
+            .bind(order_link_id)
+            .bind(next.occurred_at_ms)
+            .execute(&mut *tx)
+            .await
+            .map_err(unavailable)?;
 
         let Some(diff) = diff else {
             tx.commit().await.map_err(unavailable)?;
@@ -276,17 +316,13 @@ impl PositionRepository for PositionRepoPg {
         let user_id = &write.identity.user_id;
         let channel = &write.identity.channel;
         let mut tx = self.pool.begin().await.map_err(unavailable)?;
-        sqlx::query(
-            "UPDATE exchange.positions_v2 SET \
-             side = 'None', size = 0, closed_at_ms = $3, updated_at = now() \
-             WHERE exchange_account = $1 AND symbol = $2 AND closed_at_ms IS NULL",
-        )
-        .bind(account)
-        .bind(symbol)
-        .bind(write.closed_at_ms)
-        .execute(&mut *tx)
-        .await
-        .map_err(unavailable)?;
+        sqlx::query(CLOSE_SQL)
+            .bind(account)
+            .bind(symbol)
+            .bind(write.closed_at_ms)
+            .execute(&mut *tx)
+            .await
+            .map_err(unavailable)?;
 
         let event_id = Uuid::new_v4();
         let mut payload = closed_event_payload(CloseEvent {
@@ -420,5 +456,51 @@ fn parse_status(value: &str) -> Option<crate::domain::position::PositionStatus> 
         "Liq" => Some(crate::domain::position::PositionStatus::Liq),
         "Adl" => Some(crate::domain::position::PositionStatus::Adl),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// String-pin style (no live DB): the mutations run in ONE statement
+    /// each against fully-qualified tables, and the closed-row lifecycle is
+    /// structural — a closed row re-opens only under a fresh instance
+    /// identity (created event or non-flat observation), never from a flat
+    /// observation.
+    #[test]
+    fn mirror_mutations_are_fully_qualified_and_single_statement() {
+        for sql in [OPEN_MIRROR_SQL, UPSERT_MIRROR_SQL] {
+            assert!(sql.starts_with("INSERT INTO exchange.positions_v2"));
+            assert_eq!(
+                sql.matches("INSERT INTO").count(),
+                1,
+                "one statement per mutation: {sql}"
+            );
+            assert!(sql.contains("ON CONFLICT (exchange_account, symbol)"));
+        }
+        assert!(CLOSE_SQL.starts_with("UPDATE exchange.positions_v2"));
+    }
+
+    #[test]
+    fn closed_rows_reopen_only_as_new_instances() {
+        // The created event may only take over a CLOSED row.
+        assert!(OPEN_MIRROR_SQL.contains("WHERE exchange.positions_v2.closed_at_ms IS NOT NULL"));
+        assert!(OPEN_MIRROR_SQL.contains("closed_at_ms = NULL"));
+        // The watcher upsert keeps an open row's instance identity...
+        assert!(UPSERT_MIRROR_SQL.contains(
+            "closed_at_ms IS NULL \
+         THEN exchange.positions_v2.position_instance_id"
+        ));
+        // ...re-opens a closed row only on a non-flat observation...
+        assert!(
+            UPSERT_MIRROR_SQL
+                .contains("WHERE exchange.positions_v2.closed_at_ms IS NULL OR EXCLUDED.size <> 0")
+        );
+        // ...and always clears the close marker when it does update.
+        assert!(UPSERT_MIRROR_SQL.contains("closed_at_ms = NULL"));
+        // mark_closed flattens within the closed_is_flat vocabulary.
+        assert!(CLOSE_SQL.contains("side = 'None', size = 0"));
+        assert!(CLOSE_SQL.contains("closed_at_ms IS NULL"));
     }
 }

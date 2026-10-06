@@ -92,3 +92,90 @@ impl<R: PositionRepository> CreatedIngestor<R> {
         Ok(CreatedOutcome::Inserted)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::fake_repo::FakePositionRepository;
+    use rust_decimal::Decimal;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    fn created(link: &str) -> CreatedPosition {
+        CreatedPosition {
+            account_id: Uuid::parse_str("b3c1d2a4-0000-4000-8000-000000000001").unwrap(),
+            user_id: "user-9f2b3c".to_owned(),
+            channel: "bybit-linear".to_owned(),
+            symbol: "BTCUSDT".to_owned(),
+            order_link_id: link.to_owned(),
+            side: Side::Buy,
+            quantity: Decimal::from_str_exact("0.015").unwrap(),
+            stop_loss: Decimal::from_str_exact("62800.0").unwrap(),
+            take_profit: Decimal::from_str_exact("65000.0").unwrap(),
+            occurred_at_ms: 1_788_948_000_400,
+        }
+    }
+
+    fn identity() -> MirrorIdentity {
+        MirrorIdentity {
+            user_id: "user-9f2b3c".to_owned(),
+            channel: "bybit-linear".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn redelivery_while_open_skips() {
+        let repo = Arc::new(FakePositionRepository::default());
+        let ingestor = CreatedIngestor::new(repo.clone());
+
+        assert_eq!(
+            ingestor.ingest(&created("op-1")).await.unwrap(),
+            CreatedOutcome::Inserted
+        );
+        assert_eq!(
+            ingestor.ingest(&created("op-1")).await.unwrap(),
+            CreatedOutcome::AlreadyOpen
+        );
+        assert_eq!(repo.opened_rows().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn created_after_close_reopens_the_symbol_with_the_new_link() {
+        let repo = Arc::new(FakePositionRepository::default());
+        let ingestor = CreatedIngestor::new(repo.clone());
+        assert_eq!(
+            ingestor.ingest(&created("op-1")).await.unwrap(),
+            CreatedOutcome::Inserted
+        );
+        let first_instance = repo
+            .row(created("op-1").account_id, "BTCUSDT")
+            .unwrap()
+            .position_instance_id;
+        // The instance closed (row stays, closed_at set).
+        repo.mark_closed(crate::domain::repo::CloseWrite {
+            account: created("op-1").account_id,
+            symbol: "BTCUSDT",
+            instance_id: first_instance,
+            order_link_id: Some("op-1"),
+            identity: &identity(),
+            totals: &crate::domain::position::aggregate_closed(&[], Side::Buy),
+            fallback: true,
+            source: ChangeSource::CreatedEvent,
+            closed_at_ms: 1_788_948_100_900,
+        })
+        .await
+        .unwrap();
+
+        // A NEW order on the same symbol must take over the row.
+        assert_eq!(
+            ingestor.ingest(&created("op-2")).await.unwrap(),
+            CreatedOutcome::Inserted
+        );
+        let row = repo
+            .row(created("op-1").account_id, "BTCUSDT")
+            .expect("mirror row");
+        assert!(row.is_open(), "the closed row re-opens for the new order");
+        assert_eq!(row.order_link_id.as_deref(), Some("op-2"));
+        assert_ne!(row.position_instance_id, first_instance);
+    }
+}

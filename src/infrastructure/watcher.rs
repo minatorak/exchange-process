@@ -423,7 +423,6 @@ impl<W: WsSession, R: RestSource, Repo: PositionRepository + 'static> Watcher<W,
             }
         }
     }
-
 }
 
 fn last_record_time(records: &[bybit_rs::bybit::dto::ClosedPnlDto]) -> i64 {
@@ -451,8 +450,10 @@ fn map_closed_record(
 }
 
 fn exact(value: &str, symbol: &str) -> Option<rust_decimal::Decimal> {
+    // Negative values are valid (a losing close, a fee charged in the
+    // position's currency) — only exact parsing gates the record.
     match rust_decimal::Decimal::from_str_exact(value) {
-        Ok(value) if !value.is_sign_negative() || true => Some(value),
+        Ok(value) => Some(value),
         _ => {
             warn!(symbol, value, "closed-pnl decimal unparsable");
             None
@@ -504,6 +505,8 @@ mod tests {
             side: side.to_owned(),
             size: size.to_owned(),
             avg_price: String::new(),
+            stop_loss: String::new(),
+            take_profit: String::new(),
             leverage: String::new(),
             unrealised_pnl: String::new(),
             position_value: String::new(),
@@ -946,5 +949,98 @@ mod tests {
         assert_eq!(row.order_link_id, None);
         assert_eq!(row.side, Some(Side::Sell));
         assert!(row.is_open());
+    }
+
+    #[tokio::test]
+    async fn protection_change_fires_only_when_tp_sl_move() {
+        let repo = Arc::new(FakePositionRepository::default());
+        // Created-event open carries the ordered SL/TP.
+        let created_snapshot = crate::domain::position::PositionSnapshot {
+            exchange_account: account().exchange_account,
+            symbol: "BTCUSDT".to_owned(),
+            side: Some(Side::Buy),
+            size: Some(rust_decimal::Decimal::from_str_exact("0.015").unwrap()),
+            avg_price: None,
+            stop_loss: Some(rust_decimal::Decimal::from_str_exact("62800.0").unwrap()),
+            take_profit: Some(rust_decimal::Decimal::from_str_exact("65000.0").unwrap()),
+            leverage: None,
+            position_status: None,
+            unrealised_pnl: None,
+            position_value: None,
+            occurred_at_ms: 1_788_948_000_400,
+            seq: None,
+        };
+        repo.open_mirror(crate::domain::repo::MirrorOpen {
+            snapshot: &created_snapshot,
+            instance_id: Uuid::new_v4(),
+            order_link_id: Some("op-1"),
+            identity: &crate::domain::repo::MirrorIdentity {
+                user_id: "user-9f2b3c".to_owned(),
+                channel: "bybit-linear".to_owned(),
+            },
+            source: ChangeSource::CreatedEvent,
+        })
+        .await
+        .unwrap();
+
+        // First WS push carries the SAME protection plus the fill's average
+        // price; the second moves the stop. A push that leaves SL/TP alone
+        // must not fire protection_changed — nor wipe the mirror's values.
+        let mut first = position_dto("BTCUSDT", "Buy", "0.015", 7);
+        first.avg_price = "63250.5".to_owned();
+        first.stop_loss = "62800.0".to_owned();
+        first.take_profit = "65000.0".to_owned();
+        first.leverage = "5".to_owned();
+        let mut second = position_dto("BTCUSDT", "Buy", "0.015", 8);
+        second.avg_price = "63250.5".to_owned();
+        second.stop_loss = "62900.0".to_owned();
+        second.take_profit = "65000.0".to_owned();
+        second.leverage = "5".to_owned();
+        let connector = Arc::new(FakeConnector {
+            sessions: Mutex::new(vec![FakeSession {
+                messages: Mutex::new(vec![
+                    Ok(Some(push(vec![first]))),
+                    Ok(Some(push(vec![second]))),
+                ]),
+            }]),
+        });
+        let rest = Arc::new(FakeRest::default());
+        let watcher = Watcher::new(
+            connector,
+            rest,
+            repo.clone(),
+            account(),
+            "bybit-linear",
+            config(),
+        );
+
+        run_until_quiescent(watcher).await;
+
+        let events = repo.recorded_events();
+        // The opened audit row (never pending) plus exactly one event per
+        // real change — no protection_changed from the unchanged first push.
+        let kinds: Vec<String> = events
+            .iter()
+            .map(|event| format!("{:?}", event.kind))
+            .collect();
+        assert_eq!(kinds, vec!["Opened", "SizeChanged", "ProtectionChanged"]);
+        assert!(!events[0].pending, "the created-event open is audit-only");
+        assert_eq!(
+            events[2].payload["changed"]["stop_loss"]["to"],
+            serde_json::json!("62900.0")
+        );
+        // The mirror kept the created event's protection after the first
+        // push and tracked the moved stop after the second.
+        let row = repo
+            .row(account().exchange_account, "BTCUSDT")
+            .expect("mirror row");
+        assert_eq!(
+            row.stop_loss,
+            Some(rust_decimal::Decimal::from_str_exact("62900.0").unwrap())
+        );
+        assert_eq!(
+            row.take_profit,
+            Some(rust_decimal::Decimal::from_str_exact("65000.0").unwrap())
+        );
     }
 }
