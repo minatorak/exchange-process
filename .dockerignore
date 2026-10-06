@@ -1,0 +1,11 @@
+**/target
+**/.git
+.agents
+.claude
+.codex
+**/.env
+**/.env.*
+**/config.toml
+README.md
+# TLS private keys never enter the build context
+**/certs/*.key

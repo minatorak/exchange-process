@@ -1,0 +1,18 @@
+[package]
+name = "exchange-process-app"
+version.workspace = true
+edition.workspace = true
+default-run = "exchange-process"
+
+[[bin]]
+name = "exchange-process"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+dotenvy.workspace = true
+serde.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

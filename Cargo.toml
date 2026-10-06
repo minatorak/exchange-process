@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/exchanges/bybit",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+# Member crates; `crates/app` opts in as the composition root once consumer/
+# producer wiring lands.
+exchange-process-core = { path = "crates/core" }
+exchange-process-bybit = { path = "crates/exchanges/bybit" }
+
+anyhow = "1"
+dotenvy = "0.15"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

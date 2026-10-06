@@ -1,0 +1,7 @@
+[package]
+name = "exchange-process-bybit"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+exchange-process-core.workspace = true

@@ -1,0 +1,7 @@
+# Committed, non-secret defaults. Secrets arrive via the process environment
+# or .env.local — never from this file.
+# Precedence: process environment > .env.local > this file.
+# There is no listener in this process (ADR-0002): no port to configure.
+
+[log]
+level = "info"
