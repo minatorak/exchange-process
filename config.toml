@@ -1,7 +1,19 @@
-# Committed, non-secret defaults. Secrets arrive via the process environment
-# or .env.local — never from this file.
-# Precedence: process environment > .env.local > this file.
-# There is no listener in this process (ADR-0002): no port to configure.
+# Non-secret runtime defaults (secrets come from the process environment or
+# `.env.local` — never from here). Any key can be overridden with
+# `EXCHANGE_PROCESS__<SECTION>__<KEY>` environment variables, e.g.
+# `EXCHANGE_PROCESS__WATCHER__RECONCILE_SECS=10`.
+# Env precedence: process environment > .env.local > this file.
 
-[log]
-level = "info"
+[watcher]
+reconcile_secs = 30              # REST reconcile cadence per account
+account_resweep_secs = 60        # safety net: catch accounts not yet watched
+reconnect_backoff_min_ms = 500   # WS reconnect bounded backoff
+reconnect_backoff_max_ms = 30000
+close_settle_retry_ms = 500      # wait for the closed-pnl record after size=0
+
+[outbox]
+poll_ms = 200                    # drain cadence
+
+[created_consumer]               # consumer of exchange.position.v2.created
+group = "exchange-process-created.v1"
+dlq = "exchange-process.created-dlq.v1"

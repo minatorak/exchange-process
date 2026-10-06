@@ -1,0 +1,3 @@
+[submodule "third_party/bybit-rs"]
+	path = third_party/bybit-rs
+	url = git@github.com:minatorak/bybit-rs.git
