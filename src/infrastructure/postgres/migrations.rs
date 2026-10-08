@@ -12,14 +12,19 @@ use anyhow::Context;
 /// database. Idempotent: applied versions are tracked in
 /// `process._sqlx_migrations`, so a restart re-runs nothing.
 pub(crate) async fn run_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
-    // Isolation boundary: the schema must exist before the migrator writes
-    // its bookkeeping into it. Needs CREATE on the database only while the
-    // schema is absent — once trading-infra's exchange-process bootstrap
-    // provisions it, this is a no-op.
-    sqlx::query("CREATE SCHEMA IF NOT EXISTS process")
-        .execute(pool)
-        .await
-        .context("create process schema failed")?;
+    // Schema provisioning belongs to trading-infra. Even CREATE SCHEMA IF
+    // NOT EXISTS requires database CREATE, which this service must not hold.
+    let schemas_ready: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname = 'process') \
+         AND EXISTS (SELECT FROM pg_namespace WHERE nspname = 'exchange')",
+    )
+    .fetch_one(pool)
+    .await
+    .context("check process schemas failed")?;
+    anyhow::ensure!(
+        schemas_ready,
+        "process schemas not bootstrapped; run make bootstrap-db"
+    );
     // `sqlx::migrate!` resolves the path against CARGO_MANIFEST_DIR (the
     // crate root); migration SQL itself is fully qualified (`exchange.*`).
     sqlx::migrate!("./migrations").run(pool).await?;
@@ -34,7 +39,8 @@ mod tests {
         // String-pin style (adapter account_v2/postgres.rs tests): the
         // migration must carry the exact ownership and constraint markers.
         let migration = include_str!("../../../migrations/20261006000001_position_v2.sql");
-        assert!(migration.contains("CREATE SCHEMA IF NOT EXISTS exchange"));
+        assert!(migration.contains("exchange schema not bootstrapped"));
+        assert!(!migration.contains("CREATE SCHEMA"));
         assert!(migration.contains("CREATE TABLE exchange.positions_v2"));
         assert!(migration.contains("CREATE TABLE exchange.position_events_v2"));
         assert!(migration.contains("REFERENCES public.exchange_accounts_v2"));

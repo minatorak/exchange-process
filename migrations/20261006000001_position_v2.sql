@@ -11,7 +11,14 @@
 -- Sharing `_sqlx_migrations` with exchange-adapter's `service._sqlx_migrations`
 -- would fail whichever service boots second with sqlx `VersionMissing`.
 
-CREATE SCHEMA IF NOT EXISTS exchange;
+-- Schemas are pre-provisioned by trading-infra; no database CREATE needed.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_namespace WHERE nspname = 'exchange') THEN
+        RAISE EXCEPTION 'exchange schema not bootstrapped; run make bootstrap-db';
+    END IF;
+END
+$$;
 
 -- Current mirror of one position instance per (account, symbol) — one-way
 -- mode + position_idx=0 has at most one position per symbol. The row remains

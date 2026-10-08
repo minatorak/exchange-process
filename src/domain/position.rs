@@ -123,7 +123,7 @@ fn enum_delta<T: PartialEq + Copy>(
     }
     Some(json!({
         field: {
-            "from": previous.map(&render),
+            "from": previous.map(render),
             "to": next.map(render),
         }
     }))

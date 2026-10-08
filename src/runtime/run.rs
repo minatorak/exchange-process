@@ -141,10 +141,11 @@ pub(crate) async fn run() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("health listener bind {address} failed"))?;
     let shutdown_flag = shutting_down.clone();
+    let server_shutdown_token = shutdown_token.clone();
     let shutdown = async move {
         shutdown_signal().await;
         shutdown_flag.store(true, Ordering::Relaxed);
-        shutdown_token.cancel();
+        server_shutdown_token.cancel();
         tracing::info!("shutdown signal received; readiness flipped, tasks cancel requested");
     };
     let app = health::router(health::HealthState::new(
@@ -153,13 +154,27 @@ pub(crate) async fn run() -> anyhow::Result<()> {
     ));
     let serve = axum::serve(listener, app).with_graceful_shutdown(shutdown);
 
-    match tokio::time::timeout(SHUTDOWN_GRACE, serve).await {
-        Ok(result) => result.context("health server failed")?,
-        Err(_elapsed) => {
-            tracing::warn!("shutdown grace elapsed; aborting remaining tasks");
+    serve_until_shutdown(async move { serve.await }, shutdown_token, SHUTDOWN_GRACE).await?;
+    info!("exchange-process stopped");
+    Ok(())
+}
+
+/// Only start the grace clock after cancellation, never at service startup.
+async fn serve_until_shutdown(
+    serve: impl std::future::Future<Output = std::io::Result<()>>,
+    shutdown: CancellationToken,
+    grace: Duration,
+) -> anyhow::Result<()> {
+    tokio::pin!(serve);
+    tokio::select! {
+        result = &mut serve => result.context("health server failed")?,
+        () = shutdown.cancelled() => {
+            match tokio::time::timeout(grace, &mut serve).await {
+                Ok(result) => result.context("health server failed")?,
+                Err(_) => tracing::warn!("shutdown grace elapsed; aborting remaining tasks"),
+            }
         }
     }
-    info!("exchange-process stopped");
     Ok(())
 }
 
@@ -183,4 +198,42 @@ async fn shutdown_signal() {
             .await;
     };
     tokio::select! { () = ctrl_c => {}, () = terminate => {} }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn service_has_no_uptime_limit_and_shutdown_is_bounded() {
+        let token = CancellationToken::new();
+        let task_token = token.clone();
+        let task = tokio::spawn(serve_until_shutdown(
+            std::future::pending(),
+            task_token,
+            SHUTDOWN_GRACE,
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(SHUTDOWN_GRACE * 2).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "healthy server must outlive shutdown grace"
+        );
+        token.cancel();
+        tokio::task::yield_now().await;
+        tokio::time::advance(SHUTDOWN_GRACE).await;
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_failure_is_not_hidden_until_shutdown() {
+        let result = serve_until_shutdown(
+            async { Err(std::io::Error::other("listener failed")) },
+            CancellationToken::new(),
+            SHUTDOWN_GRACE,
+        )
+        .await;
+        assert!(result.is_err());
+    }
 }

@@ -55,5 +55,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 # Health-probe router oneshot tests (tower::ServiceExt).
 tower = { version = "0.5", features = ["util"] }
