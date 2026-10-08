@@ -1,26 +1,59 @@
-[workspace]
-resolver = "2"
-members = [
-    "crates/core",
-    "crates/exchanges/bybit",
-    "crates/app",
-]
-
-[workspace.package]
+# CTX: Single-package exchange-process. Position lifecycle tracking v2:
+#      consumes `exchange.position.v2.created` (Kafka) -> mirror row, watches
+#      Bybit private WS + REST reconcile per account, publishes
+#      `updated`/`closed` through a transactional outbox.
+#      The database is shared with exchange-adapter by schema: this package
+#      owns `exchange` + `process` schemas and never writes adapter tables
+#      (read-only `public.exchange_accounts_v2` + `..._credentials_v2`).
+# RULE:
+#   - every third-party version is pinned here, never duplicated elsewhere
+#   - layers import downward only: domain < application < {api, infrastructure} < runtime
+#     (src/boundary.rs enforces the direction at test time)
+#   - NEVER re-add a workspace; one package, one deployable binary (ADR-0003)
+#   - no gRPC, no business API — Kafka in/out plus health probes only (ADR-0002, ADR-0004)
+[package]
+name = "exchange-process"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+license = "UNLICENSED"
+publish = false
 
-[workspace.dependencies]
-# Member crates; `crates/app` opts in as the composition root once consumer/
-# producer wiring lands.
-exchange-process-core = { path = "crates/core" }
-exchange-process-bybit = { path = "crates/exchanges/bybit" }
-
+[dependencies]
+# AES-256-GCM credential envelope — same key material as exchange-adapter's
+# account_v2 storage crypto; sealed rows only open under their own context.
+aes-gcm = "0.10"
 anyhow = "1"
-dotenvy = "0.15"
+async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+base64 = "0.22"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# Vendored Bybit V5 SDK (private position/execution WS + REST reads), pinned
+# by submodule under third_party/bybit-rs — same vendor as exchange-adapter.
+bybit-rs = { path = "third_party/bybit-rs" }
+# Static librdkafka via cmake-build, matching order-process/exchange-adapter.
+rdkafka = { version = "0.37", features = ["cmake-build", "libz-static", "tokio"] }
+rust_decimal = { version = "1", features = ["serde-str"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls",
+    "rust_decimal",
+    "json",
+    "migrate",
+    "macros",
+    "uuid",
+] }
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+# CancellationToken for cooperative graceful shutdown (order-process pattern).
+tokio-util = "0.7"
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# Health-probe router oneshot tests (tower::ServiceExt).
+tower = { version = "0.5", features = ["util"] }

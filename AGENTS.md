@@ -1,49 +1,25 @@
 # AGENTS.md
 
-คำสั่งสำหรับ coding agent ที่ทำงานใน repo นี้ — อ่านตามลำดับนี้ก่อนแตะ code
+กฎสำหรับ agent/นักพัฒนาที่แตะ repo นี้ — อ่านก่อนเขียน code
 
-## ลำดับการอ่าน
+## สถานะและบทบาท
 
-1. [CONTEXT.md](CONTEXT.md) — ศัพท์ domain และความหมายที่ตกลงกัน
-2. [STRUCTURE.md](STRUCTURE.md) — หน้าที่ของทุก folder, กติกาต่อ layer และตาราง "จะเพิ่มของใหม่ต้องแตะไฟล์ไหน"
-3. [ARCHITECTURE.md](ARCHITECTURE.md) — components, ทิศทาง dependency และ runtime composition
-4. [docs/adr/](docs/adr/) — เฉพาะเลขที่เกี่ยวกับงานที่จะทำ (แต่ละ ADR คือเหตุผลของ decision ที่ freeze แล้ว แก้ไม่ได้ ทับด้วยฉบับใหม่เท่านั้น)
+- Service นี้คือ **position lifecycle tracking** ของ feature `docs/exchange-position-v2/` (repo รวม: `../docs/exchange-position-v2/`) — consume `exchange.position.v2.created`, mirror position ต่อ account, publish `updated`/`closed`
+- โครงสร้าง single package ห้า layer `domain < application < {api, infrastructure} < runtime` — `src/boundary.rs` fail `cargo test` ถ้า import ไปทางขึ้น (ADR-0003 supersedes แผน workspace เดิม)
 
-## Ownership และ dependency boundaries
+## ข้อห้ามเด็ดขาด
 
-ทิศทาง dependency ของ workspace: **`exchanges/* → core ← app`**
+1. **ไม่มี gRPC / business API** — Kafka เข้า-ออก + health probes `/livez` `/readyz` เท่านั้น (ADR-0002 + ADR-0004)
+2. **ห้ามเขียนตารางของ exchange-adapter** — `public` อ่านได้แค่ `exchange_accounts_v2` + `exchange_account_credentials_v2` แบบ read-only; เขียนได้เฉพาะ `exchange` schema (สองตาราง) + `process._sqlx_migrations`
+3. **ห้ามแชร์ sqlx bookkeeping กับ adapter** — `process._sqlx_migrations` เท่านั้น (share กัน = boot fail `VersionMissing`); migration SQL อ้างตาราง fully-qualified
+4. **Decimals เป็น string ตลอดทาง** — `Decimal::from_str_exact` ทุกจุดที่แตะค่าจาก exchange/event; ห้ามผ่าน float
+5. **Credentials**: decrypt ต่อ call ใน memory ของ watcher — ห้าม log/persist/echo; key มาจาก env (`CREDENTIAL_DECRYPT_KEY` + `CREDENTIAL_DECRYPT_KEY_ID`, secret ชุดเดียวกับ adapter)
+6. **Payload จาก exchange = untrusted** — validate vocabulary (`side`: Buy/Sell/ว่าง, `positionStatus`: Normal/Liq/Adl) + exact decimal ที่ mapping boundary; ไม่ผ่าน = log + skip (reconcile heal)
+7. **Event ออกผ่าน outbox เท่านั้น** — ห้าม publish ตรงข้าม Kafka โดยไม่เขียน `position_events_v2` ก่อนใน tx เดียวกับ mirror
 
-| Crate | เป็นเจ้าของ | ห้าม |
-| --- | --- | --- |
-| `exchange-process-core` | domain กลาง exchange-agnostic + identity/seam ที่ทุก exchange ต้องทำตาม (`Exchange`, consumer/producer port ในอนาคต) | รู้จัก broker client, exchange SDK, framework, หรือ exchange เจาะจงใด ๆ |
-| `exchange-process-bybit` | mapping งาน Bybit → domain ของ core (consumer/producer ของ stream ฝั่ง Bybit) | ให้ type ของ SDK รั่วออกนอก crate; depend อะไรนอกจาก core |
-| `exchange-process-app` | composition root: config, tracing, spawn/drain ของ consumer/producer session | ใส่ business rule ที่ควรอยู่ใน core; อ่าน config นอก `config.rs` (+ `CONFIG_FILE` ใน `main.rs`); เปิด listener/transport ขาเข้าใด ๆ (ADR-0002) |
+## แบบแผน
 
-กติกาเสริม:
-
-- **Service นี้ไม่มี REST และ gRPC** (ADR-0002) — ห้ามเพิ่ม axum/tonic/HTTP server/gRPC server หรือ listener ใด ๆ เว้นแต่มี ADR ใหม่ทับ
-- เพิ่ม exchange ใหม่ = additive เสมอ: variant ใหม่ใน `Exchange::ALL` + crate ใหม่ใน `crates/exchanges/<name>/` — ห้ามแก้ semantic ของ variant เดิม
-- ทุก config key ใหม่ต้องมี serde default = พฤติกรรมเดิม (config เก่าที่ไม่มี key ใหม่ต้องยังโหลดและรันได้)
-- dependency ให้เปิดเท่าที่มี consumer จริง — ห้ามเพิ่ม broker/SDK เพียงเพราะ "จะใช้เร็ว ๆ นี้"
-- module ใหม่ใช้ `name.rs` + folder `name/` ไม่ใช้ `mod.rs`
-
-## Security / lifecycle constraints
-
-- **Secret ห้ามปนใน repo**: `config.toml` เก็บค่า non-secret เท่านั้น; secret ทั้งหมดมาทาง env (`.env.local` ที่ gitignored) — อย่า log credential, อย่าใส่ token จริงใน `.env.example`
-- **Shutdown เป็นแบบ graceful**: รับ SIGTERM/SIGINT → session ที่กำลังทำงานหยุดแบบ cooperative (งานที่รับมาจบก่อน) → process exit — ห้ามตัดกลาง session
-
-## คำสั่ง verify
-
-```sh
-make fmt-check          # format ตรง
-make check              # type-check (--locked)
-make lint               # clippy -D warnings (--locked)
-make test               # cargo test --workspace (--locked)
-```
-
-## วิธีรายงานผล
-
-- ระบุไฟล์:บรรทัดของทุก assertion สำคัญ; แยกชัดว่าอะไร "ตรวจแล้ว" (รันจริง ได้ output) กับอะไร "อ่านแล้วอ้างเหตุผล"
-- ถ้าเปลี่ยน behavior: บอก INTENT (code เดิมทำ X, งาน/contract คาดหวัง Y, เอกสารไหนเป็น reference)
-- ถ้า verify ไม่ผ่านหลังพยายาม 3 รอบ หรือติดสิ่งที่ควบคุมไม่ได้ (credentials, network, permissions) — หยุดและรายงานสิ่งที่ลอง + output จริง + hypothesis ปัจจุบัน อย่าฝืนแก้จนบิด requirement
-- ห้าม weaken check หรือ fabricate สิ่งที่ check หาเพื่อให้ผ่าน
+- Migration ใหม่ = ไฟล์ใหม่ใน `migrations/` แบบ forward-only, ห้ามแก้ไฟล์ที่ deploy ไปแล้ว
+- ตาราง shape ใหญ่รอบหน้า = สร้าง `*_v3` ข้างเดิม (policy ของ suffix `_v2`)
+- Tests: unit ของ diff/dedupe/aggregation + ingest idempotency + outbox retry + watcher flows อยู่ใน module ของแต่ละ file; fixture ของ event ต้องตรง `trading-contracts/testdata/events/` (copied verbatim — แก้ registry ก่อนเสมอถ้าจะแก้ field)
+- `make test && make lint` ต้องผ่านก่อนจบทุกงาน
