@@ -1,6 +1,6 @@
 //! Read-only access to exchange-adapter's account tables — the access
-//! contract (ADR-0012): the ONLY `public` tables this service may touch are
-//! `exchange_accounts_v2` and `exchange_account_credentials_v2`, read-only.
+//! contract: the ONLY Adapter-owned tables this service may touch are
+//! `exchange.exchange_accounts_v2` and `exchange.exchange_account_credentials_v2`, read-only.
 //! Credentials decrypt per call inside the watcher's memory.
 
 use sqlx::PgPool;
@@ -9,6 +9,16 @@ use uuid::Uuid;
 use crate::infrastructure::crypto::{
     AccountCredentials, CredentialCrypto, SealedCredentials, StorageContext,
 };
+
+const ACCOUNTS_SQL: &str = "SELECT exchange_account, user_id, environment \
+    FROM exchange.exchange_accounts_v2 \
+    WHERE status = 'active' AND provider = 'bybit'";
+const CREDENTIALS_SQL: &str = "SELECT a.user_id, a.provider, a.channel, a.environment, \
+    c.credential_ciphertext, c.credential_nonce, c.encryption_key_id, \
+    c.encryption_format_version \
+    FROM exchange.exchange_accounts_v2 a \
+    JOIN exchange.exchange_account_credentials_v2 c USING (exchange_account) \
+    WHERE a.exchange_account = $1 AND a.status = 'active' AND a.provider = 'bybit'";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AccountError {
@@ -52,14 +62,10 @@ impl AccountSourcePg {
 #[async_trait::async_trait]
 impl AccountSource for AccountSourcePg {
     async fn active_accounts(&self) -> Result<Vec<ActiveAccount>, AccountError> {
-        let rows = sqlx::query_as::<_, AccountRow>(
-            "SELECT exchange_account, user_id, environment \
-             FROM public.exchange_accounts_v2 \
-             WHERE status = 'active' AND provider = 'bybit'",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|_| AccountError::Unavailable)?;
+        let rows = sqlx::query_as::<_, AccountRow>(ACCOUNTS_SQL)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|_| AccountError::Unavailable)?;
         Ok(rows
             .into_iter()
             .map(|row| ActiveAccount {
@@ -71,19 +77,12 @@ impl AccountSource for AccountSourcePg {
     }
 
     async fn credentials(&self, account: Uuid) -> Result<AccountCredentials, AccountError> {
-        let row = sqlx::query_as::<_, CredentialRow>(
-            "SELECT a.user_id, a.provider, a.channel, a.environment, \
-             c.credential_ciphertext, c.credential_nonce, c.encryption_key_id, \
-             c.encryption_format_version \
-             FROM public.exchange_accounts_v2 a \
-             JOIN public.exchange_account_credentials_v2 c USING (exchange_account) \
-             WHERE a.exchange_account = $1 AND a.status = 'active' AND a.provider = 'bybit'",
-        )
-        .bind(account)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|_| AccountError::Unavailable)?
-        .ok_or(AccountError::CredentialsMissing(account))?;
+        let row = sqlx::query_as::<_, CredentialRow>(CREDENTIALS_SQL)
+            .bind(account)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|_| AccountError::Unavailable)?
+            .ok_or(AccountError::CredentialsMissing(account))?;
 
         let context = StorageContext {
             exchange_account: account,
@@ -125,27 +124,20 @@ struct CredentialRow {
 
 #[cfg(test)]
 mod tests {
-    /// Read-only enforcement pin (string-pin style): the queries must name
-    /// exactly the two allowed tables and never write.
+    use super::{ACCOUNTS_SQL, CREDENTIALS_SQL};
+
+    /// Test the actual runtime queries, not duplicate test-only SQL.
     #[test]
     fn queries_are_read_only_and_pinned() {
-        const ACCOUNTS: &str = "SELECT exchange_account, user_id, environment \
-             FROM public.exchange_accounts_v2 \
-             WHERE status = 'active' AND provider = 'bybit'";
-        const CREDENTIALS: &str = "SELECT a.user_id, a.provider, a.channel, a.environment, \
-             c.credential_ciphertext, c.credential_nonce, c.encryption_key_id, \
-             c.encryption_format_version \
-             FROM public.exchange_accounts_v2 a \
-             JOIN public.exchange_account_credentials_v2 c USING (exchange_account) \
-             WHERE a.exchange_account = $1 AND a.status = 'active' AND a.provider = 'bybit'";
-        for query in [ACCOUNTS, CREDENTIALS] {
-            assert!(query.contains("public.exchange_accounts_v2"));
+        for query in [ACCOUNTS_SQL, CREDENTIALS_SQL] {
+            assert!(query.contains("exchange.exchange_accounts_v2"));
+            assert!(!query.contains("public."));
             assert!(!query.contains("INSERT"));
             assert!(!query.contains("UPDATE "));
             assert!(!query.contains("DELETE"));
+            assert!(!query.contains("credential_operations_v2"));
         }
-        assert!(CREDENTIALS.contains("public.exchange_account_credentials_v2"));
-        // No third public table may appear.
-        assert!(!CREDENTIALS.contains("public.exchange_accounts_v1"));
+        assert!(CREDENTIALS_SQL.contains("exchange.exchange_account_credentials_v2"));
+        assert!(!CREDENTIALS_SQL.contains("exchange_accounts_v1"));
     }
 }

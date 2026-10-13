@@ -24,7 +24,7 @@ src/
 │       ├── kafka.rs         # consumer session/supervisor/DLQ + CreatedHandler + rdkafka publisher adapter
 │       ├── outbox_publisher.rs  # drain pending events → Kafka → mark_published
 │       ├── postgres/
-│       │   ├── pool.rs          # search_path=process,exchange,public pin
+│       │   ├── pool.rs          # search_path=process,exchange pin
 │       │   ├── migrations.rs    # sqlx::migrate! boot runner
 │       │   ├── position_repo.rs # mirror writes: 1 tx = positions_v2 + position_events_v2
 │       │   ├── events_repo.rs   # outbox claim (SKIP LOCKED) + mark
@@ -41,5 +41,5 @@ src/
 migrations/                  # sqlx forward-only; ตาราง fully-qualified ใน exchange.*
 third_party/bybit-rs         # vendored SDK (submodule, pin เดียวกับ exchange-adapter)
 config.toml                  # non-secret defaults
-docs/adr/                    # 0001 workspace (superseded), 0002 no-API, 0003 single-package, 0004 health
+docs/adr/                    # 0001 workspace (superseded), 0002 no-API, 0003 single-package, 0004 health, 0005 shared schema
 ```

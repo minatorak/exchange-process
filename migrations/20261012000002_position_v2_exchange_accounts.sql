@@ -2,12 +2,13 @@
 -- Source: docs/exchange-position-v2/exchange-process/spec.md §3.1–3.2 (rev 3).
 -- Schema ownership: this package writes ONLY the `exchange` schema (two
 -- tables below) and its own `process._sqlx_migrations` bookkeeping. The
--- adapter's `public` tables are read-only:
---   - read:  public.exchange_accounts_v2, public.exchange_account_credentials_v2
---   - never: everything else in public (adapter-owned)
+-- adapter-owned account tables in the shared `exchange` namespace are read-only:
+--   - read: exchange.exchange_accounts_v2, exchange.exchange_account_credentials_v2
+--   - never: exchange.credential_operations_v2 or any Adapter table writes
 -- Migration SQL references tables fully-qualified so it never depends on the
 -- connection search_path; the bookkeeping table lands in `process` because
--- pool.rs pins `search_path = process,exchange,public` on every connection.
+-- pool.rs pins `search_path = process,exchange` on every connection.
+-- Canonical stream after explicit DEV rebaseline; historical public-FK SQL is archived.
 -- Sharing `_sqlx_migrations` with exchange-adapter's `service._sqlx_migrations`
 -- would fail whichever service boots second with sqlx `VersionMissing`.
 
@@ -24,7 +25,7 @@ $$;
 -- mode + position_idx=0 has at most one position per symbol. The row remains
 -- after close (closed_at_ms set, size 0): recovery source + final state.
 CREATE TABLE exchange.positions_v2 (
-    exchange_account UUID NOT NULL REFERENCES public.exchange_accounts_v2 (exchange_account) ON DELETE RESTRICT,
+    exchange_account UUID NOT NULL REFERENCES exchange.exchange_accounts_v2 (exchange_account) ON DELETE RESTRICT,
     symbol TEXT NOT NULL,
     user_id TEXT NOT NULL,
     channel TEXT NOT NULL,              -- 'bybit-linear' (derive จาก provider + product)
