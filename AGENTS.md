@@ -21,5 +21,5 @@
 
 - Migration ใหม่ = ไฟล์ใหม่ใน `migrations/` แบบ forward-only, ห้ามแก้ไฟล์ที่ deploy ไปแล้ว
 - ตาราง shape ใหญ่รอบหน้า = สร้าง `*_v3` ข้างเดิม (policy ของ suffix `_v2`)
-- Tests: unit ของ diff/dedupe/aggregation + ingest idempotency + outbox retry + watcher flows อยู่ใน module ของแต่ละ file; fixture ของ event ต้องตรง `trading-contracts/testdata/events/` (copied verbatim — แก้ registry ก่อนเสมอถ้าจะแก้ field)
+- Tests: unit ของ diff/dedupe/aggregation + ingest idempotency + outbox retry + watcher flows อยู่ใน module ของแต่ละ file; fixture ของ event ต้องตรง `contracts/testdata/events/` (copied verbatim — แก้ registry ก่อนเสมอถ้าจะแก้ field)
 - `make test && make lint` ต้องผ่านก่อนจบทุกงาน

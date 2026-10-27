@@ -1,7 +1,7 @@
 //! JSON codec of the exchange-adapter position contract:
 //! `exchange.position.v2.created` (topic name = event type). The field set
 //! is pinned to the shared fixture
-//! (`trading-contracts/testdata/events/exchange.position.v2.created.json`,
+//! (`contracts/testdata/events/exchange.position.v2.created.json`,
 //! copied verbatim in the tests) — every deviation is a decode error so the
 //! session routes the message to the DLQ instead of half-applying it.
 
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn fixture_created_event_decodes() {
-        // Verbatim trading-contracts
+        // Verbatim contracts
         // testdata/events/exchange.position.v2.created.json — the parity pin.
         let fixture = r#"{
           "event_type": "exchange.position.v2.created",
