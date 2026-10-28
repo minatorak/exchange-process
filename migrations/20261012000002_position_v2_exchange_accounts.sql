@@ -12,7 +12,7 @@
 -- Sharing `_sqlx_migrations` with exchange-adapter's `service._sqlx_migrations`
 -- would fail whichever service boots second with sqlx `VersionMissing`.
 
--- Schemas are pre-provisioned by trading-infra; no database CREATE needed.
+-- Schemas are pre-provisioned by infra; no database CREATE needed.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_namespace WHERE nspname = 'exchange') THEN

@@ -12,7 +12,7 @@ use anyhow::Context;
 /// database. Idempotent: applied versions are tracked in
 /// `process._sqlx_migrations`, so a restart re-runs nothing.
 pub(crate) async fn run_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
-    // Schema provisioning belongs to trading-infra. Even CREATE SCHEMA IF
+    // Schema provisioning belongs to infra. Even CREATE SCHEMA IF
     // NOT EXISTS requires database CREATE, which this service must not hold.
     let schemas_ready: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname = 'process') \

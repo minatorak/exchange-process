@@ -20,7 +20,7 @@ pub(crate) struct PoolConfig {
 /// `validate_applied_migrations`), and writing there would violate the
 /// never-write-adapter-tables constraint. Account reads are explicitly
 /// qualified in the shared `exchange` namespace; no public fallback.
-/// Schema ownership and grants are provisioned only by trading-infra.
+/// Schema ownership and grants are provisioned only by infra.
 pub(crate) const SEARCH_PATH: &str = "process,exchange";
 
 pub(crate) async fn connect(config: &PoolConfig) -> anyhow::Result<PgPool> {

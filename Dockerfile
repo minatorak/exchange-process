@@ -8,7 +8,7 @@
 #        git submodule update --init
 #        docker build -t exchange-process:dev .
 #
-#      Contract satisfied here (trading-infra/docs/service-onboarding.md):
+#      Contract satisfied here (infra/docs/service-onboarding.md):
 #        - mounted config binds 0.0.0.0, never 127.0.0.1
 #        - configuration and secrets arrive at runtime; neither is baked in
 #        - no password or .env baked into the image
