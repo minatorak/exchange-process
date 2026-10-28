@@ -19,11 +19,15 @@ make test                         # unit ทั้งหมด offline
 make run                          # รันจริง (config.toml + .env.local)
 ```
 
-Database แชร์กับ exchange-adapter แบ่งด้วย schema: service นี้เขียนเฉพาะ `exchange` +
-`process._sqlx_migrations` (pool pin `search_path=process,exchange,public`), อ่าน
-`public.exchange_accounts_v2` + `public.exchange_account_credentials_v2` แบบ read-only.
-Migration รันตอน boot ครั้งแรก — ต้องมีสิทธิ์ CREATE บน database ถ้า trading-infra
-ยังไม่ provision (`db/bootstrap/exchange-process.sql`).
+Database แชร์ business namespace `exchange` กับ exchange-adapter แต่แยก table owners:
+service นี้เขียนเฉพาะ `exchange.positions_v2`, `exchange.position_events_v2` +
+`process._sqlx_migrations` (pool pin `search_path=process,exchange`), อ่าน
+`exchange.exchange_accounts_v2` + `exchange.exchange_account_credentials_v2` แบบ read-only.
+Schema owner คือ infra-managed `trading_admin`; runtime role ไม่มี database CREATE.
+Bootstrap ต้อง provision schemas/grants ก่อน migration รันตอน boot.
+Canonical migration version `20261012000002` ต้อง explicit rebaseline สำหรับ legacy
+public-FK history; ledger เก่าที่ยังไม่ rebaseline fail closed (`VersionMissing`)
+ตอน boot (ADR-0005).
 
 ## Health
 

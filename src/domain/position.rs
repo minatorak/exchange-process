@@ -681,7 +681,7 @@ mod tests {
             closed_at_ms: 1_788_948_100_900,
         });
 
-        // Verbatim trading-contracts fixture: field set equality is the
+        // Verbatim contracts fixture: field set equality is the
         // producer parity pin (order is not part of the JSON contract).
         let fixture = r#"{
           "event_type": "exchange.position.v2.closed",
@@ -771,7 +771,7 @@ mod tests {
             changed: &json!({"stop_loss": {"from": "62500.0", "to": "62800.0"}}),
         });
 
-        // Verbatim trading-contracts fixture.
+        // Verbatim contracts fixture.
         let fixture = r#"{
           "event_type": "exchange.position.v2.updated",
           "event_id": "8a4c2f1b-9d3e-4a7b-b6c8-2f1e3d4a5b02",
